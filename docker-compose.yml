@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  whatsapp-monitor:
+    build: .
+    container_name: whatsapp-monitor
+    ports:
+      - "3000:3000"
+    volumes:
+      # Persist authentication data
+      - whatsapp-auth:/app/.wwebjs_auth
+      - whatsapp-cache:/app/.wwebjs_cache
+      # Persist message logs
+      - ./GP_read_history.txt:/app/GP_read_history.txt
+      # Mount Google Sheets credentials (keep out of image)
+      - ./credentials.json:/app/credentials.json:ro
+    environment:
+      - NODE_ENV=production
+    env_file:
+      - .env
+    restart: unless-stopped
+    # Add security options for Chrome
+    security_opt:
+      - seccomp:unconfined
+    # Increase shared memory size for Chrome
+    shm_size: '2gb'
+
+volumes:
+  whatsapp-auth:
+  whatsapp-cache:

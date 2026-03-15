@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Group Monitor</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+
+<body>
+    <div class="container">
+        <header>
+            <h1>📱 WhatsApp Group Monitor</h1>
+            <p class="subtitle">Monitor and archive messages from like "GP read" group</p>
+        </header>
+
+        <div class="status-card" id="statusCard">
+            <div class="status-indicator" id="statusIndicator">
+                <span class="status-dot"></span>
+                <span id="statusText">Checking connection...</span>
+            </div>
+        </div>
+
+        <div class="qr-container" id="qrContainer" style="display: none;">
+            <h2>🔐 Scan QR Code</h2>
+            <p>Scan this QR code with your WhatsApp mobile app</p>
+            <div id="qrCode"></div>
+        </div>
+
+        <div class="controls" id="controls" style="display: none;">
+            <div class="control-group">
+                <h2>📥 Fetch Messages</h2>
+                <p>Retrieve messages from the group</p>
+
+                <div class="input-group">
+                    <label for="groupNameInput">Group Name:</label>
+                    <div class="input-wrapper">
+                        <input type="text" id="groupNameInput" class="text-input" placeholder="Enter group name"
+                            value="GP read" list="groupSuggestions">
+                        <datalist id="groupSuggestions"></datalist>
+                    </div>
+                    <p class="input-hint">Currently monitoring: <strong id="currentGroup">GP read</strong></p>
+                </div>
+
+                <div class="input-group">
+                    <label for="messageLimitInput">Number of Messages:</label>
+                    <div class="input-wrapper">
+                        <input type="number" id="messageLimitInput" class="text-input" placeholder="10"
+                            value="10" min="1" max="100">
+                    </div>
+                    <p class="input-hint">Max 100. Processed in batches of 5.</p>
+                </div>
+
+                <div class="checkbox-group">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="deleteCheckbox">
+                        <span>Delete messages after reading</span>
+                    </label>
+                </div>
+
+                <button id="readButton" class="btn btn-primary">
+                    <span class="btn-icon">📖</span>
+                    Read Messages
+                </button>
+            </div>
+
+            <div class="control-group">
+                <h2>📄 Download Log</h2>
+                <p>Download the complete message history file</p>
+                <button id="downloadButton" class="btn btn-secondary">
+                    <span class="btn-icon">⬇️</span>
+                    Download Log File
+                </button>
+            </div>
+        </div>
+
+        <div class="messages-container" id="messagesContainer" style="display: none;">
+            <div class="messages-header">
+                <h2>Recent Messages</h2>
+                <span class="message-count" id="messageCount">0 messages</span>
+            </div>
+            <div class="messages-list" id="messagesList"></div>
+        </div>
+
+        <div class="loading-overlay" id="loadingOverlay" style="display: none;">
+            <div class="spinner"></div>
+            <p>Processing...</p>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="script.js"></script>
+</body>
+
+</html>
