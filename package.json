@@ -8,7 +8,7 @@
   },
   "keywords": ["whatsapp", "monitor", "google-sheets", "automation"],
   "author": "",
-  "license": "ISC",
+  "license": "MIT",
   "type": "commonjs",
   "dependencies": {
     "dotenv": "^17.3.1",

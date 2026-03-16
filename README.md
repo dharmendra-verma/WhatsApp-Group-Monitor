@@ -142,4 +142,4 @@ WhatsApp/
 
 ## License
 
-ISC
+[MIT](LICENSE)
