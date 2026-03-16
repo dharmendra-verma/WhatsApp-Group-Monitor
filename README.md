@@ -29,7 +29,7 @@ A Dockerized web application to monitor, archive, and manage messages from Whats
 npm install
 
 # Start the server
-npm run server
+npm start
 ```
 
 Open `http://localhost:3000`, scan the QR code with WhatsApp, and start reading messages.
@@ -37,7 +37,7 @@ Open `http://localhost:3000`, scan the QR code with WhatsApp, and start reading 
 ### Using Docker
 
 ```bash
-docker-compose up --build
+docker-compose up -d --build
 ```
 
 Open `http://localhost:3000` and scan the QR code.
@@ -45,7 +45,7 @@ Open `http://localhost:3000` and scan the QR code.
 Docker will automatically:
 - Mount `credentials.json` and load `.env` for Google Sheets integration (if configured)
 - Persist WhatsApp authentication and cache across restarts
-- Save message logs to `GP_read_history.txt` on your host machine
+- Save message logs to `data/` directory on your host machine
 
 ## Google Sheets Integration (Optional)
 
@@ -93,7 +93,7 @@ You can verify the configuration at `http://localhost:3000/sheets-status`.
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/status` | Connection status, current group, available groups |
-| POST | `/read-messages` | Fetch messages (`{ groupName, deleteMessages }`) |
+| POST | `/read-messages` | Fetch messages (`{ groupName, messageLimit, sinceDate, deleteMessages }`) |
 | GET | `/download-log` | Download the message log file |
 | POST | `/configure-sheets` | Configure Google Sheets at runtime |
 | GET | `/sheets-status` | Google Sheets configuration status |
@@ -102,25 +102,33 @@ You can verify the configuration at `http://localhost:3000/sheets-status`.
 
 ```
 WhatsApp/
-├── server.ts              # Express server & WhatsApp client
-├── index.ts               # CLI version
-├── googleSheets.ts        # Google Sheets integration module
+├── src/
+│   ├── server.ts              # Express app entry point
+│   ├── routes/
+│   │   ├── status.ts          # Status & Google Sheets config endpoints
+│   │   └── messages.ts        # Message fetching & log download endpoints
+│   ├── services/
+│   │   ├── whatsapp.ts        # WhatsApp client & message processing
+│   │   └── googleSheets.ts    # Google Sheets API integration
+│   └── utils/
+│       └── logger.ts          # File logging utility
 ├── public/
-│   ├── index.html         # Web UI
-│   ├── styles.css         # Styling
-│   └── script.js          # Client-side JavaScript
-├── Dockerfile             # Docker configuration
-├── docker-compose.yml     # Docker Compose setup
-├── .env.example           # Environment variable template
-├── package.json           # Dependencies
-└── tsconfig.json          # TypeScript configuration
+│   ├── index.html             # Web UI
+│   ├── styles.css             # Styling
+│   └── script.js              # Client-side JavaScript
+├── data/                      # Runtime output (message logs)
+├── Dockerfile                 # Docker configuration
+├── docker-compose.yml         # Docker Compose setup
+├── .env.example               # Environment variable template
+├── package.json               # Dependencies
+└── tsconfig.json              # TypeScript configuration
 ```
 
 ## Troubleshooting
 
 **QR Code not showing** - Wait a few seconds for initialization, then check the browser console.
 
-**Authentication fails** - Delete the `.wwebjs_auth` folder and restart.
+**Authentication fails** - Delete the `.wwebjs_auth` folder and restart. If using Docker, remove the auth volume: `docker volume rm whatsapp_whatsapp-auth`.
 
 **Messages not deleting** - Only your own messages can be deleted for everyone. Others' messages can only be deleted for yourself.
 
