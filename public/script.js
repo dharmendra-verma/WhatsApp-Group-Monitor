@@ -15,6 +15,7 @@ const messagesContainer = document.getElementById('messagesContainer');
 const messagesList = document.getElementById('messagesList');
 const messageCount = document.getElementById('messageCount');
 const messageLimitInput = document.getElementById('messageLimitInput');
+const sinceDateInput = document.getElementById('sinceDateInput');
 const loadingOverlay = document.getElementById('loadingOverlay');
 
 // Check status periodically
@@ -88,16 +89,23 @@ const readMessages = async () => {
 
         const groupName = groupNameInput.value.trim() || 'GP read';
 
+        const requestBody = {
+            deleteMessages: deleteCheckbox.checked,
+            groupName: groupName,
+            messageLimit: parseInt(messageLimitInput.value) || 10
+        };
+
+        // Add optional since date filter
+        if (sinceDateInput.value) {
+            requestBody.sinceDate = new Date(sinceDateInput.value).toISOString();
+        }
+
         const response = await fetch('/read-messages', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                deleteMessages: deleteCheckbox.checked,
-                groupName: groupName,
-                messageLimit: parseInt(messageLimitInput.value) || 10
-            })
+            body: JSON.stringify(requestBody)
         });
 
         const data = await response.json();

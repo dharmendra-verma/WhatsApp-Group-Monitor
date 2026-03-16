@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   whatsapp-monitor:
     build: .
@@ -11,7 +9,7 @@ services:
       - whatsapp-auth:/app/.wwebjs_auth
       - whatsapp-cache:/app/.wwebjs_cache
       # Persist message logs
-      - ./GP_read_history.txt:/app/GP_read_history.txt
+      - ./data:/app/data
       # Mount Google Sheets credentials (keep out of image)
       - ./credentials.json:/app/credentials.json:ro
     environment:

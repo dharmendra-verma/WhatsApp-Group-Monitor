@@ -6,5 +6,5 @@ node_modules/
 *.md
 .wwebjs_auth/
 .wwebjs_cache/
-GP_read_history.txt
+data/
 credentials.json

@@ -43,10 +43,10 @@ RUN npm ci --only=production && npm install typescript ts-node @types/express ex
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/.wwebjs_auth /app/.wwebjs_cache /app/public
+RUN mkdir -p /app/.wwebjs_auth /app/.wwebjs_cache /app/public /app/data
 
 # Expose port
 EXPOSE 3000
 
 # Start the application
-CMD ["npx", "ts-node", "server.ts"]
+CMD ["npx", "ts-node", "src/server.ts"]
