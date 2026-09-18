@@ -1,5 +1,6 @@
-# Use Node.js LTS version
-FROM node:18-bullseye
+# Node.js 20 LTS on Debian bookworm (ships a much newer Chromium than bullseye,
+# which WhatsApp Web needs)
+FROM node:20-bookworm
 
 # Install dependencies for Puppeteer
 RUN apt-get update && apt-get install -y \
@@ -33,17 +34,18 @@ ENV PUPPETEER_SKIP_CHROMIUM_DOWNLOAD=true \
 # Create app directory
 WORKDIR /app
 
-# Copy package files
+# Copy package files and the postinstall patch script (runs during npm ci)
 COPY package*.json ./
+COPY scripts ./scripts
 
 # Install dependencies
-RUN npm ci --only=production && npm install typescript ts-node @types/express express
+RUN npm ci --omit=dev && npm install typescript ts-node @types/express express
 
 # Copy application files
 COPY . .
 
 # Create necessary directories
-RUN mkdir -p /app/.wwebjs_auth /app/.wwebjs_cache /app/public /app/data
+RUN mkdir -p /app/.wwebjs_auth /app/.wwebjs_cache /app/public /app/data /app/secrets
 
 # Expose port
 EXPOSE 3000
