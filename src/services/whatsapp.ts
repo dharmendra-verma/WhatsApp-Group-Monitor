@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import { appendToLog } from '../utils/logger';
 import { appendBatchToSheet } from './googleSheets';
@@ -37,8 +39,23 @@ export const setIsReading = (value: boolean) => { isReading = value; };
 export const getCurrentGroupName = () => currentGroupName;
 export const setCurrentGroupName = (name: string) => { currentGroupName = name; };
 
+// Chromium leaves Singleton* lock files in its profile. When the container is
+// recreated (new hostname) Chromium refuses to start with "profile appears to be
+// in use by another computer". The lock is always stale at startup, so remove it.
+const clearStaleChromiumLocks = () => {
+    const sessionDir = path.join(process.cwd(), '.wwebjs_auth', 'session');
+    for (const name of ['SingletonLock', 'SingletonCookie', 'SingletonSocket']) {
+        try {
+            fs.rmSync(path.join(sessionDir, name), { force: true });
+        } catch {
+            // ignore - file may not exist
+        }
+    }
+};
+
 export const initializeClient = () => {
     console.log('Initializing WhatsApp Client...');
+    clearStaleChromiumLocks();
 
     client = new Client({
         authStrategy: new LocalAuth(),
@@ -59,6 +76,24 @@ export const initializeClient = () => {
     client.on('qr', (qr: string) => {
         console.log('QR RECEIVED');
         qrCodeData = qr;
+        isAuthenticated = false;
+    });
+
+    client.on('authenticated', () => {
+        console.log('✅ Authenticated - loading WhatsApp data (can take several minutes for large accounts)...');
+        qrCodeData = null;
+    });
+
+    client.on('loading_screen', (percent: number | string, message: string) => {
+        console.log(`⏳ Loading WhatsApp: ${percent}% ${message || ''}`);
+    });
+
+    client.on('change_state', (state: string) => {
+        console.log('WhatsApp state:', state);
+    });
+
+    client.on('disconnected', (reason: string) => {
+        console.warn('⚠️  WhatsApp disconnected:', reason);
         isAuthenticated = false;
     });
 

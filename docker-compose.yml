@@ -2,6 +2,8 @@ services:
   whatsapp-monitor:
     build: .
     container_name: whatsapp-monitor
+    # Fixed hostname keeps Chromium's profile lock valid across container re-creation
+    hostname: whatsapp-monitor
     ports:
       - "3000:3000"
     volumes:
@@ -10,8 +12,9 @@ services:
       - whatsapp-cache:/app/.wwebjs_cache
       # Persist message logs
       - ./data:/app/data
-      # Mount Google Sheets credentials (keep out of image)
-      - ./credentials.json:/app/credentials.json:ro
+      # Google Sheets credentials: put credentials.json in ./secrets (kept out of image and git).
+      # A folder mount works even when no credentials file exists yet.
+      - ./secrets:/app/secrets:ro
     environment:
       - NODE_ENV=production
     env_file:

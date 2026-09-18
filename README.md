@@ -19,13 +19,13 @@ A Dockerized web application to monitor, archive, and manage messages from Whats
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 20+
 - npm
 
 ### Local Development
 
 ```bash
-# Install dependencies
+# Install dependencies (also applies the whatsapp-web.js compat patch, see below)
 npm install
 
 # Start the server
@@ -43,7 +43,7 @@ docker-compose up -d --build
 Open `http://localhost:3000` and scan the QR code.
 
 Docker will automatically:
-- Mount `credentials.json` and load `.env` for Google Sheets integration (if configured)
+- Mount the `secrets/` folder (put `credentials.json` there) and load `.env` for Google Sheets integration (if configured)
 - Persist WhatsApp authentication and cache across restarts
 - Save message logs to `data/` directory on your host machine
 
@@ -54,7 +54,7 @@ Docker will automatically:
 1. Go to [Google Cloud Console](https://console.cloud.google.com/)
 2. Create a project and enable the **Google Sheets API**
 3. Create a **Service Account** under "APIs & Services" > "Credentials"
-4. Generate a JSON key and save it as `credentials.json` in the project root
+4. Generate a JSON key and save it as `secrets/credentials.json`
 
 ### 2. Create and Share a Google Sheet
 
@@ -71,7 +71,7 @@ cp .env.example .env
 Edit `.env` with your values:
 
 ```env
-GOOGLE_SHEETS_CREDENTIALS_PATH=./credentials.json
+GOOGLE_SHEETS_CREDENTIALS_PATH=./secrets/credentials.json
 GOOGLE_SHEETS_SPREADSHEET_ID=your_spreadsheet_id_here
 GOOGLE_SHEETS_SHEET_NAME=WhatsApp Messages
 ```
@@ -112,6 +112,8 @@ WhatsApp/
 │   │   └── googleSheets.ts    # Google Sheets API integration
 │   └── utils/
 │       └── logger.ts          # File logging utility
+├── scripts/
+│   └── patch-wwebjs.js        # postinstall compat patch for whatsapp-web.js
 ├── public/
 │   ├── index.html             # Web UI
 │   ├── styles.css             # Styling
@@ -130,13 +132,19 @@ WhatsApp/
 
 **Authentication fails** - Delete the `.wwebjs_auth` folder and restart. If using Docker, remove the auth volume: `docker volume rm whatsapp_whatsapp-auth`.
 
+**QR scanned but nothing happens** - After scanning, the log shows `Authenticated` and `Loading WhatsApp: N%`. Large accounts can take 10-15 minutes before `Client is ready!`. Keep the phone online meanwhile. Avoid re-scanning repeatedly: WhatsApp then temporarily blocks linking ("Can't link new devices right now").
+
+**"Unable to load chats" / `r: r` errors** - WhatsApp Web renamed message-key fields (`_serialized` -> `$1`), which breaks `whatsapp-web.js` <= 1.34.7. `scripts/patch-wwebjs.js` (run automatically on `npm install` / Docker build) fixes this; check the install output for `[patch-wwebjs] ... patched`. Once an upstream release includes the fix, the script skips itself.
+
+**"The profile appears to be in use by another computer"** - Stale Chromium lock after the container was recreated. The app removes these locks on startup; the fixed `hostname` in `docker-compose.yml` also prevents it.
+
 **Messages not deleting** - Only your own messages can be deleted for everyone. Others' messages can only be deleted for yourself.
 
 **Google Sheets errors** - Verify the sheet is shared with the service account email and that the spreadsheet ID is correct. Check `/sheets-status`.
 
 ## Security Notes
 
-- Never commit `credentials.json` or `.env` to version control
+- Never commit `credentials.json`, `secrets/` or `.env` to version control
 - Don't expose port 3000 publicly without authentication
 - Review WhatsApp's terms of service regarding automation
 
