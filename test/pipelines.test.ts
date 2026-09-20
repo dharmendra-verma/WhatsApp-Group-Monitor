@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import {
     extractUrls, extensionFor, stampFor, slug, mediaTypeAllowed,
-    processMessage, readNewResultLines, PipelineConfig, shortMsgId,
+    processMessage, readNewResultLines, PipelineConfig, shortMsgId, sweepDeletions, PipelineState, seedDeletionBacklog,
 } from '../src/services/pipelines';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pipe-'));
@@ -124,4 +124,66 @@ test('reading pipeline (dir mode): one file per message in pending/, no twin on 
     // no link -> nothing queued
     await processMessage(p, { ...facts, id: 'x_y_OTHERKEY0001_z', body: 'no link' }, async () => undefined, 'UTC');
     assert.deepEqual(fs.readdirSync(pend), []);
+});
+
+test('processMessage reports whether the message was captured durably', async () => {
+    const dir = tmp();
+    const r: PipelineConfig = { id: 'r', group: 'g', media: { dir } };
+    const dl = async () => ({ mimetype: 'image/png', data: Buffer.from('x').toString('base64') });
+    assert.equal(await processMessage(r, { id: 'a_b_K1_c', timestamp: 1, sender: 's', body: '', hasMedia: true }, dl, 'UTC'), true);
+    assert.equal(await processMessage(r, { id: 'a_b_K2_c', timestamp: 1, sender: 's', body: 'paid gas 561', hasMedia: false }, dl, 'UTC'), true);
+    // a video in a receipts group: logged, but NOT kept -> must not be deleted
+    const vid = async () => ({ mimetype: 'video/mp4', data: Buffer.from('x').toString('base64') });
+    assert.equal(await processMessage(r, { id: 'a_b_K3_c', timestamp: 1, sender: 's', body: '', hasMedia: true }, vid, 'UTC'), false);
+    const q: PipelineConfig = { id: 'q', group: 'g', queue: { dir, onlyWithUrls: true } };
+    assert.equal(await processMessage(q, { id: 'a_b_K4_c', timestamp: 1, sender: 's', body: 'https://e.com/x', hasMedia: false }, dl, 'UTC'), true);
+    // chatter without a link, no sheet configured -> exists nowhere -> not captured
+    assert.equal(await processMessage(q, { id: 'a_b_K5_c', timestamp: 1, sender: 's', body: 'hello', hasMedia: false }, dl, 'UTC'), false);
+});
+
+test('sweepDeletions: deletes captured messages, retries failures, gives up after 3, skips gone ones', async () => {
+    const calls: string[] = [];
+    const ok = (id: string) => ({ delete: async (everyone?: boolean) => { calls.push(`${id}:${everyone}`); } });
+    const bad = { delete: async () => { throw new Error('boom'); } };
+    const ps: PipelineState = { lastTs: 0, seen: [], deletable: ['m1', 'm2', 'gone', 'revoked'] };
+    const p: PipelineConfig = { id: 'p', group: 'g', deleteAfterCapture: 'me' };
+    const lookup = async (id: string) =>
+        id === 'm1' ? ok('m1') : id === 'm2' ? bad : id === 'revoked' ? { type: 'revoked', delete: async () => {} } : null;
+    const errors: string[] = [];
+    assert.equal(await sweepDeletions(p, ps, lookup, errors), 1);
+    assert.deepEqual(calls, ['m1:false']);
+    assert.deepEqual(ps.deletable, ['m2']);                     // only the failing one stays
+    await sweepDeletions(p, ps, lookup, errors);
+    assert.deepEqual(ps.deletable, ['m2']);
+    assert.equal(errors.length, 0);
+    await sweepDeletions(p, ps, lookup, errors);                // 3rd failure -> give up, report
+    assert.deepEqual(ps.deletable, []);
+    assert.equal(errors.length, 1);
+    assert.equal(ps.deletedTotal, 1);
+    // 'everyone' passes true; disabled pipeline deletes nothing
+    const ps2: PipelineState = { lastTs: 0, seen: [], deletable: ['x'] };
+    await sweepDeletions({ ...p, deleteAfterCapture: 'everyone' }, ps2, async () => ok('x'), []);
+    assert.deepEqual(calls.slice(-1), ['x:true']);
+    const ps3: PipelineState = { lastTs: 0, seen: [], deletable: ['y'] };
+    assert.equal(await sweepDeletions({ ...p, deleteAfterCapture: false }, ps3, async () => ok('y'), []), 0);
+    assert.deepEqual(ps3.deletable, ['y']);
+});
+
+test('seedDeletionBacklog: only messages provably on disk, only once', async () => {
+    const dir = tmp();
+    const rp: PipelineConfig = { id: 'r', group: 'g', media: { dir }, deleteAfterCapture: 'me' };
+    await processMessage(rp, { id: 't_g_SAVED00001_a', timestamp: 1, sender: 's', body: '', hasMedia: true },
+        async () => ({ mimetype: 'application/pdf', data: 'eA==' }), 'UTC');
+    const ps: PipelineState = { lastTs: 0, seen: ['t_g_SAVED00001_a', 't_g_NOTONDISK1_a'] };
+    assert.equal(seedDeletionBacklog(rp, ps), 1);
+    assert.deepEqual(ps.deletable, ['t_g_SAVED00001_a']);
+    assert.equal(seedDeletionBacklog(rp, ps), 0);                // once only
+    const qdir = tmp();
+    const qp: PipelineConfig = { id: 'q', group: 'g', queue: { dir: qdir }, deleteAfterCapture: 'me' };
+    const id = 'true_1@g.us_3A7ED02E703B66525358_8131@lid';
+    fs.mkdirSync(path.join(qdir, 'processed', '2026-09'), { recursive: true });
+    fs.writeFileSync(path.join(qdir, 'processed', '2026-09', `2026-09-19_214936_${shortMsgId(id)}.json`), '{}');
+    const qs: PipelineState = { lastTs: 0, seen: [id, 'x_y_OTHER00000_z'] };
+    assert.equal(seedDeletionBacklog(qp, qs), 1);
+    assert.deepEqual(qs.deletable, [id]);
 });

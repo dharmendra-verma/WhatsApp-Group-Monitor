@@ -15,7 +15,8 @@
           "application/pdf"
         ],
         "includeTextOnly": true
-      }
+      },
+      "deleteAfterCapture": "me"
     },
     {
       "id": "reading",
@@ -29,7 +30,8 @@
       },
       "results": {
         "file": "/app/drops/reading/results.jsonl"
-      }
+      },
+      "deleteAfterCapture": "me"
     }
   ]
 }

@@ -98,6 +98,7 @@ message to downstream tools through plain files on a mounted folder.
 | `media` | Downloads attachments (default: images + PDFs) into `dir` as `WA_<YYYY-MM-DD_HHMMSS>_<sender>_<id>.<ext>`, and appends a line to `_whatsapp-manifest.jsonl` with the caption, sender and time. Text-only messages are logged to the manifest too. |
 | `sheet` | Appends `Timestamp, Group, Sender, Message, Message ID, Status, Output` (A:G) to the Google Sheet. |
 | `queue` | Hands `{msgId, group, sender, timestamp, text, urls}` to a processor. With `dir`: one file per message, `<dir>/pending/<YYYY-MM-DD_HHMMSS>_<id>.json`; the processor **moves** it to `<dir>/processed/…` when done, so `pending/` always shows exactly what is waiting. (Legacy `file`: one append-only JSONL.) `onlyWithUrls` skips messages without a link. |
+| `deleteAfterCapture` | `"me"` or `"everyone"`: delete the WhatsApp message once it is **captured durably** (attachment saved, manifest/queue written, or sheet row written) — never before, and never a message whose attachment type is not saved. Retried each poll, up to 3 attempts. `"me"` removes it cleanly on all your linked devices; `"everyone"` revokes it for all members where WhatsApp allows (own message, recent) and leaves a "This message was deleted" bubble. Omit to keep messages. |
 | `results` | Reads a JSONL file written **by** the processor (`{msgId, status, output, note}`) and writes Status/Output back into that message's sheet row. |
 
 Delivery is at-least-once: a message is marked seen (in `stateFile`) only after its

@@ -11,6 +11,8 @@
  *              or, legacy, a line in a JSONL file
  *   - results: read a JSONL file written BY the downstream processor and sync
  *              each entry's status/output back to the sheet row (matched on id)
+ *   - deleteAfterCapture: delete the WhatsApp message once it has been captured
+ *              durably (file saved / queued / sheet row written) — never before
  *
  * The contract with downstream consumers is plain files on a mounted volume,
  * so the consumer never needs network access to this container.
@@ -69,6 +71,12 @@ export interface PipelineConfig {
     sheet?: SheetConfig;
     queue?: QueueConfig;
     results?: ResultsConfig;
+    // Delete the WhatsApp message after it was captured durably:
+    //   'me'       — delete for me (clean: no "This message was deleted" bubble; syncs to your linked devices)
+    //   'everyone' — revoke for all members where WhatsApp allows it (own message, within its time
+    //                limit); otherwise WhatsApp falls back to delete-for-me. Leaves a placeholder bubble.
+    //   omitted / false — keep messages (default)
+    deleteAfterCapture?: false | 'me' | 'everyone';
 }
 
 export interface PipelinesFile {
@@ -80,9 +88,13 @@ export interface PipelinesFile {
     pipelines: PipelineConfig[];
 }
 
-interface PipelineState {
+export interface PipelineState {
     lastTs: number;                    // unix seconds of newest processed message
     seen: string[];                    // recent message ids (bounded)
+    deletable?: string[];              // captured durably, still to delete in WhatsApp
+    deleteFailures?: Record<string, number>;
+    deletedTotal?: number;
+    deleteSeeded?: boolean;            // backlog of already-seen messages checked once for deletion
 }
 
 interface StateFile {
@@ -91,6 +103,7 @@ interface StateFile {
 }
 
 const SEEN_CAP = 1000;
+const DELETE_MAX_ATTEMPTS = 3;
 const TS_GRACE_SECONDS = 600;          // re-check a small window before lastTs (clock skew / late sync)
 
 let cfg: PipelinesFile | null = null;
@@ -261,8 +274,9 @@ export const processMessage = async (
     facts: MessageFacts,
     download: () => Promise<{ mimetype: string; data: string; filename?: string | null } | undefined>,
     timeZone: string,
-): Promise<void> => {
+): Promise<boolean> => {
     const urls = extractUrls(facts.body);
+    let captured = false;              // true once the message exists somewhere durable
 
     // 1) media → folder + manifest
     if (p.media) {
@@ -289,11 +303,14 @@ export const processMessage = async (
                     originalFilename: media.filename || null,
                 });
                 console.log(`📥 [${p.id}] saved ${path.basename(target)}`);
+                captured = true;
             } else {
+                // Not a type we save: log it, but do NOT count it captured (the attachment itself is not kept).
                 appendLine(manifest, { ...base, file: null, skipped: `mimetype ${media.mimetype} not in types` });
             }
         } else if (p.media.includeTextOnly !== false && facts.body.trim()) {
             appendLine(manifest, { ...base, file: null });
+            captured = true;
         }
     }
 
@@ -315,8 +332,10 @@ export const processMessage = async (
             if (!fs.existsSync(target) && !alreadyProcessed(p.queue.dir, `${name}.json`)) {
                 writeFileAtomic(target, JSON.stringify(item, null, 2) + '\n');
             }
+            captured = true;
         } else if (p.queue.file) {
             appendLine(p.queue.file, item);
+            captured = true;
         } else {
             throw new Error(`pipeline ${p.id}: queue needs "dir" or "file"`);
         }
@@ -334,7 +353,9 @@ export const processMessage = async (
             '',
         ]], 'A:G');
         if (!res.success) sheetErrors.push(`${p.id}: ${facts.id}: sheet append failed: ${res.error}`);
+        else captured = true;
     }
+    return captured;
 };
 
 // ---------------------------------------------------------------------------
@@ -387,6 +408,89 @@ const syncResults = async (p: PipelineConfig) => {
 };
 
 // ---------------------------------------------------------------------------
+// Delete-after-capture
+// ---------------------------------------------------------------------------
+
+export interface DeletableMsg {
+    type?: string;
+    delete: (everyone?: boolean) => Promise<unknown>;
+}
+
+/** Is there durable evidence on disk that this message was captured? Used only for the one-time backlog. */
+export const verifyCapturedOnDisk = (p: PipelineConfig, id: string): boolean => {
+    if (p.media) {
+        const manifest = path.join(p.media.dir, p.media.manifest || '_whatsapp-manifest.jsonl');
+        const archivedLedger = path.join(p.media.dir, 'archived', '_processed.jsonl');
+        for (const f of [manifest, archivedLedger]) {
+            if (!fs.existsSync(f)) continue;
+            for (const line of fs.readFileSync(f, 'utf8').split('\n')) {
+                if (!line.includes(id)) continue;
+                try {
+                    const o = JSON.parse(line);
+                    if (o.msgId === id && !o.skipped) return true;
+                } catch { /* ignore */ }
+            }
+        }
+    }
+    if (p.queue?.dir) {
+        const suffix = `_${shortMsgId(id)}.json`;
+        const roots = [path.join(p.queue.dir, 'pending'), path.join(p.queue.dir, 'processed')];
+        const walk = (d: string): boolean => fs.existsSync(d) && fs.readdirSync(d, { withFileTypes: true })
+            .some(e => e.isDirectory() ? walk(path.join(d, e.name)) : e.name.endsWith(suffix));
+        if (roots.some(walk)) return true;
+    }
+    return false;
+};
+
+/** First run with deleteAfterCapture: queue for deletion the already-seen messages that are provably on disk. */
+export const seedDeletionBacklog = (p: PipelineConfig, ps: PipelineState): number => {
+    if (!p.deleteAfterCapture || ps.deleteSeeded) return 0;
+    const add = ps.seen.filter(id => !(ps.deletable || []).includes(id) && verifyCapturedOnDisk(p, id));
+    ps.deletable = [...(ps.deletable || []), ...add];
+    ps.deleteSeeded = true;
+    return add.length;
+};
+
+/**
+ * Delete every message in ps.deletable. Runs every poll, so a failed delete is retried
+ * (up to DELETE_MAX_ATTEMPTS) and a backlog drains on its own. Only ids that were captured
+ * durably ever enter ps.deletable, so nothing is deleted that exists nowhere else.
+ */
+export const sweepDeletions = async (
+    p: PipelineConfig,
+    ps: PipelineState,
+    lookup: (id: string) => Promise<DeletableMsg | null | undefined>,
+    errors: string[],
+): Promise<number> => {
+    if (!p.deleteAfterCapture || !ps.deletable?.length) return 0;
+    ps.deleteFailures = ps.deleteFailures || {};
+    let deleted = 0;
+    for (const id of [...ps.deletable]) {
+        const drop = () => {
+            ps.deletable = (ps.deletable || []).filter(x => x !== id);
+            delete ps.deleteFailures![id];
+        };
+        try {
+            const msg = await lookup(id);
+            if (!msg || msg.type === 'revoked') { drop(); continue; }          // already gone
+            await msg.delete(p.deleteAfterCapture === 'everyone');
+            drop();
+            deleted++;
+        } catch (err: any) {
+            const n = (ps.deleteFailures[id] || 0) + 1;
+            ps.deleteFailures[id] = n;
+            if (n >= DELETE_MAX_ATTEMPTS) {
+                errors.push(`${p.id}: gave up deleting ${id} after ${n} attempts: ${err?.message || err}`);
+                drop();
+            }
+        }
+    }
+    ps.deletedTotal = (ps.deletedTotal || 0) + deleted;
+    if (deleted) console.log(`🗑️  [${p.id}] deleted ${deleted} captured message(s) from "${p.group}"`);
+    return deleted;
+};
+
+// ---------------------------------------------------------------------------
 // Polling loop
 // ---------------------------------------------------------------------------
 
@@ -426,7 +530,7 @@ const runPipeline = async (client: Client, p: PipelineConfig, errors: string[]):
     for (const msg of fresh) {
         const id = msg.id._serialized;
         try {
-            await processMessage(p, {
+            const captured = await processMessage(p, {
                 id,
                 timestamp: msg.timestamp,
                 sender: await senderOf(msg),
@@ -434,6 +538,7 @@ const runPipeline = async (client: Client, p: PipelineConfig, errors: string[]):
                 hasMedia: !!msg.hasMedia,
             }, async () => msg.downloadMedia() as any, cfg?.timeZone || 'Asia/Kolkata');
             markSeen(ps, id, msg.timestamp);
+            if (captured && p.deleteAfterCapture) (ps.deletable = ps.deletable || []).push(id);
             saveState();
             done++;
         } catch (err: any) {
@@ -442,6 +547,15 @@ const runPipeline = async (client: Client, p: PipelineConfig, errors: string[]):
             break;
         }
     }
+
+    try {
+        const seeded = seedDeletionBacklog(p, ps);
+        if (seeded) console.log(`🗑️  [${p.id}] ${seeded} earlier message(s) verified on disk, queued for deletion`);
+        const byId = new Map(msgs.map(m => [m.id._serialized, m]));
+        await sweepDeletions(p, ps, async id =>
+            (byId.get(id) as any) ?? ((await client.getMessageById(id).catch(() => null)) as any), errors);
+    } catch (err: any) { errors.push(`${p.id}: delete sweep: ${err?.message || err}`); }
+    saveState();
 
     try { await syncResults(p); } catch (err: any) { errors.push(`${p.id}: ${err?.message || err}`); }
     saveState();
@@ -520,6 +634,9 @@ export const getPipelinesStatus = () => ({
         enabled: p.enabled !== false,
         lastTs: state.pipelines[p.id] ? isoFor(state.pipelines[p.id].lastTs) : null,
         seen: state.pipelines[p.id]?.seen.length ?? 0,
+        deleteAfterCapture: p.deleteAfterCapture || false,
+        awaitingDelete: state.pipelines[p.id]?.deletable?.length ?? 0,
+        deletedTotal: state.pipelines[p.id]?.deletedTotal ?? 0,
     })),
     lastRun,
 });
