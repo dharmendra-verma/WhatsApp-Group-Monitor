@@ -6,7 +6,9 @@
  *   - media:   download attachments (receipts, PDFs, photos) into a folder,
  *              with a JSONL manifest carrying caption / sender / timestamp
  *   - sheet:   append a row to the Google Sheet (A:G incl. message id + status)
- *   - queue:   append a JSON line to a queue file for a downstream processor
+ *   - queue:   hand the message to a downstream processor — one JSON file per
+ *              message in <dir>/pending/ (the processor moves it to processed/),
+ *              or, legacy, a line in a JSONL file
  *   - results: read a JSONL file written BY the downstream processor and sync
  *              each entry's status/output back to the sheet row (matched on id)
  *
@@ -49,7 +51,9 @@ export interface SheetConfig {
 }
 
 export interface QueueConfig {
-    file: string;                      // JSONL file the processor consumes
+    dir?: string;                      // PREFERRED: one JSON file per message in <dir>/pending/;
+                                       // the processor moves each file to <dir>/processed/ when done
+    file?: string;                     // legacy: one JSONL file (append-only). Ignored when dir is set.
     onlyWithUrls?: boolean;            // queue only messages containing a link (default false)
 }
 
@@ -154,6 +158,17 @@ export const stampFor = (unixSeconds: number, timeZone: string): string => {
 
 export const isoFor = (unixSeconds: number): string => new Date(unixSeconds * 1000).toISOString();
 
+/**
+ * The unique part of a WhatsApp message id, for file names.
+ * Ids look like  true_<chat>@g.us_<MESSAGE-KEY>_<author>@lid ; the tail (<author>@lid)
+ * is the same for every message you send, so the key is what tells messages apart.
+ */
+export const shortMsgId = (id: string, len = 10): string => {
+    const parts = (id || '').split('_');
+    const key = parts.length >= 3 ? parts[2] : parts[parts.length - 1] || id;
+    return slug(key, 64).slice(-len) || 'unknown';
+};
+
 export const mediaTypeAllowed = (mimetype: string, types?: string[]): boolean => {
     const allowed = types && types.length ? types : ['image/', 'application/pdf'];
     const m = (mimetype || '').toLowerCase();
@@ -182,6 +197,15 @@ const uniquePath = (dir: string, base: string, ext: string): string => {
         n++;
     }
     return candidate;
+};
+
+/** True if <dir>/processed/<any subfolder>/<name> exists. */
+const alreadyProcessed = (dir: string, name: string): boolean => {
+    const root = path.join(dir, 'processed');
+    if (!fs.existsSync(root)) return false;
+    if (fs.existsSync(path.join(root, name))) return true;
+    return fs.readdirSync(root, { withFileTypes: true })
+        .some(d => d.isDirectory() && fs.existsSync(path.join(root, d.name, name)));
 };
 
 // ---------------------------------------------------------------------------
@@ -255,7 +279,7 @@ export const processMessage = async (
             if (!media || !media.data) throw new Error('media download returned nothing');
             if (mediaTypeAllowed(media.mimetype, p.media.types)) {
                 const ext = extensionFor(media.mimetype, media.filename);
-                const name = `WA_${stampFor(facts.timestamp, timeZone)}_${slug(facts.sender, 20)}_${slug(facts.id.slice(-8), 8)}`;
+                const name = `WA_${stampFor(facts.timestamp, timeZone)}_${slug(facts.sender, 20)}_${shortMsgId(facts.id)}`;
                 const target = uniquePath(p.media.dir, name, ext);
                 writeFileAtomic(target, Buffer.from(media.data, 'base64'));
                 appendLine(manifest, {
@@ -275,14 +299,27 @@ export const processMessage = async (
 
     // 2) queue line (before the sheet: the processor must never miss an item)
     if (p.queue && (!p.queue.onlyWithUrls || urls.length)) {
-        appendLine(p.queue.file, {
+        const item = {
             msgId: facts.id,
             group: p.group,
             sender: facts.sender,
             timestamp: isoFor(facts.timestamp),
             text: facts.body,
             urls,
-        });
+        };
+        if (p.queue.dir) {
+            const name = `${stampFor(facts.timestamp, timeZone)}_${shortMsgId(facts.id)}`;
+            const pending = path.join(p.queue.dir, 'pending');
+            const target = path.join(pending, `${name}.json`);
+            // Retried after a crash? The file may already be in pending/ or processed/ — never write a twin.
+            if (!fs.existsSync(target) && !alreadyProcessed(p.queue.dir, `${name}.json`)) {
+                writeFileAtomic(target, JSON.stringify(item, null, 2) + '\n');
+            }
+        } else if (p.queue.file) {
+            appendLine(p.queue.file, item);
+        } else {
+            throw new Error(`pipeline ${p.id}: queue needs "dir" or "file"`);
+        }
     }
     // 3) sheet row — best effort: a Sheets outage must not stall the folder/queue hand-off,
     //    so a failure is reported (sheetErrors) but does not block the message.

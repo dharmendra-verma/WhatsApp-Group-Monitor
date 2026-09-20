@@ -24,7 +24,7 @@
         "name": "WhatsApp Messages"
       },
       "queue": {
-        "file": "/app/drops/reading/queue.jsonl",
+        "dir": "/app/drops/reading",
         "onlyWithUrls": true
       },
       "results": {
