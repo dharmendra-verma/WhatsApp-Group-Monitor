@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { getStatus } from '../services/whatsapp';
 import { getGoogleSheetsStatus, initializeGoogleSheets, ensureSheetExists } from '../services/googleSheets';
 import { setGoogleSheetsConfig, getGoogleSheetsConfig } from '../services/whatsapp';
+import { getPipelinesStatus, runPipelinesOnce } from '../services/pipelines';
 
 const router = Router();
 
@@ -53,6 +54,20 @@ router.get('/sheets-status', (req: Request, res: Response) => {
         spreadsheetId: config.spreadsheetId,
         sheetName: config.sheetName
     });
+});
+
+router.get('/pipelines-status', (req: Request, res: Response) => {
+    res.json(getPipelinesStatus());
+});
+
+// Trigger an immediate poll of every pipeline (otherwise runs every pollIntervalMinutes)
+router.post('/pipelines/run', async (req: Request, res: Response) => {
+    try {
+        const result = await runPipelinesOnce();
+        res.json({ success: true, lastRun: result });
+    } catch (error: any) {
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 export default router;

@@ -5,9 +5,15 @@
   "main": "src/server.ts",
   "scripts": {
     "start": "ts-node src/server.ts",
-    "postinstall": "node scripts/patch-wwebjs.js"
+    "postinstall": "node scripts/patch-wwebjs.js",
+    "test": "node --test --require ts-node/register test/*.test.ts"
   },
-  "keywords": ["whatsapp", "monitor", "google-sheets", "automation"],
+  "keywords": [
+    "whatsapp",
+    "monitor",
+    "google-sheets",
+    "automation"
+  ],
   "author": "",
   "license": "MIT",
   "type": "commonjs",

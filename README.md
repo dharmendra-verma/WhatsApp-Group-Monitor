@@ -88,6 +88,42 @@ You can verify the configuration at `http://localhost:3000/sheets-status`.
 4. **Auto-Delete** - Optionally check "Delete messages after reading"
 5. **Download Logs** - Click "Download Log File" for the complete message history
 
+## Pipelines (automatic, multi-group)
+
+Pipelines watch configured groups on a timer (no button click) and hand each new
+message to downstream tools through plain files on a mounted folder.
+
+| Action | What it does |
+|---|---|
+| `media` | Downloads attachments (default: images + PDFs) into `dir` as `WA_<YYYY-MM-DD_HHMMSS>_<sender>_<id>.<ext>`, and appends a line to `_whatsapp-manifest.jsonl` with the caption, sender and time. Text-only messages are logged to the manifest too. |
+| `sheet` | Appends `Timestamp, Group, Sender, Message, Message ID, Status, Output` (A:G) to the Google Sheet. |
+| `queue` | Appends `{msgId, group, sender, timestamp, text, urls}` to a JSONL file for a processor. `onlyWithUrls` skips messages without a link. |
+| `results` | Reads a JSONL file written **by** the processor (`{msgId, status, output, note}`) and writes Status/Output back into that message's sheet row. |
+
+Delivery is at-least-once: a message is marked seen (in `stateFile`) only after its
+media/queue actions succeed, so failures are retried on the next poll (consumers
+should de-duplicate on `msgId`). The sheet row is best effort: a Sheets outage shows
+up in `/pipelines-status` but never stalls the folder/queue hand-off.
+On the very first run, `backfillHours` limits how far back it looks.
+
+Setup:
+
+1. Copy `pipelines.example.json`, set the exact group names and folders.
+2. Mount it and the target folders, and point `PIPELINES_CONFIG` at it:
+
+```yaml
+    environment:
+      - PIPELINES_CONFIG=/app/config/pipelines.json
+    volumes:
+      - ./pipelines.json:/app/config/pipelines.json:ro
+      - "C:/path/to/receipts:/app/drops/receipts"
+      - "C:/path/to/reading-inbox:/app/drops/reading"
+```
+
+3. Check `GET /pipelines-status`; force an immediate poll with `POST /pipelines/run`.
+
+Tests: `npm test`.
+
 ## API Endpoints
 
 | Method | Endpoint | Description |
@@ -97,6 +133,8 @@ You can verify the configuration at `http://localhost:3000/sheets-status`.
 | GET | `/download-log` | Download the message log file |
 | POST | `/configure-sheets` | Configure Google Sheets at runtime |
 | GET | `/sheets-status` | Google Sheets configuration status |
+| GET | `/pipelines-status` | Pipelines config, per-group watermark, last run and errors |
+| POST | `/pipelines/run` | Poll all pipelines now |
 
 ## Project Structure
 
@@ -109,6 +147,7 @@ WhatsApp/
 │   │   └── messages.ts        # Message fetching & log download endpoints
 │   ├── services/
 │   │   ├── whatsapp.ts        # WhatsApp client & message processing
+│   │   ├── pipelines.ts       # Automatic multi-group routing (media / sheet / queue)
 │   │   └── googleSheets.ts    # Google Sheets API integration
 │   └── utils/
 │       └── logger.ts          # File logging utility

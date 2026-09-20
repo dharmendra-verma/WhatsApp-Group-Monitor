@@ -3,6 +3,7 @@ import path from 'path';
 import { Client, LocalAuth, Message } from 'whatsapp-web.js';
 import { appendToLog } from '../utils/logger';
 import { appendBatchToSheet } from './googleSheets';
+import { startPipelines } from './pipelines';
 
 let client: Client | null = null;
 let qrCodeData: string | null = null;
@@ -125,6 +126,9 @@ export const initializeClient = () => {
                 }
             }
         }
+
+        // Pipelines find their own groups, so start them even if the chat cache failed.
+        startPipelines(client!).catch(err => console.error('Pipelines failed to start:', err));
     });
 
     client.on('auth_failure', (msg: string) => {
