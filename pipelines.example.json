@@ -1,0 +1,35 @@
+{
+  "pollIntervalMinutes": 5,
+  "fetchLimit": 50,
+  "backfillHours": 24,
+  "timeZone": "Asia/Kolkata",
+  "stateFile": "/app/data/pipeline-state.json",
+  "pipelines": [
+    {
+      "id": "receipts",
+      "group": "Bill & Receipt",
+      "media": {
+        "dir": "/app/drops/receipts",
+        "types": [
+          "image/",
+          "application/pdf"
+        ],
+        "includeTextOnly": true
+      }
+    },
+    {
+      "id": "reading",
+      "group": "GP read",
+      "sheet": {
+        "name": "WhatsApp Messages"
+      },
+      "queue": {
+        "file": "/app/drops/reading/queue.jsonl",
+        "onlyWithUrls": true
+      },
+      "results": {
+        "file": "/app/drops/reading/results.jsonl"
+      }
+    }
+  ]
+}

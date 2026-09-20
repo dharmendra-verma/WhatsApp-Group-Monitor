@@ -40,6 +40,13 @@ export const appendBatchToSheet = async (
     spreadsheetId: string,
     sheetName: string,
     rows: string[][]
+) => appendRowsToSheet(spreadsheetId, sheetName, rows, 'A:D');
+
+export const appendRowsToSheet = async (
+    spreadsheetId: string,
+    sheetName: string,
+    rows: string[][],
+    columns: string = 'A:D'
 ) => {
     if (!isGoogleSheetsEnabled || !sheets) {
         console.log('Google Sheets not enabled, skipping...');
@@ -49,7 +56,7 @@ export const appendBatchToSheet = async (
     try {
         const response = await sheets.spreadsheets.values.append({
             spreadsheetId,
-            range: `${sheetName}!A:D`,
+            range: `${sheetName}!${columns}`,
             valueInputOption: 'RAW',
             insertDataOption: 'INSERT_ROWS',
             requestBody: {
@@ -62,6 +69,59 @@ export const appendBatchToSheet = async (
     } catch (error: any) {
         console.error('❌ Failed to write to Google Sheets:', error.message);
         return { success: false, error: error.message };
+    }
+};
+
+export const isSheetsReady = () => isGoogleSheetsEnabled && sheets !== null;
+
+/** All values of one column (index 0 = row 1). */
+export const readColumn = async (spreadsheetId: string, sheetName: string, column: string): Promise<string[]> => {
+    if (!isSheetsReady()) return [];
+    const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `${sheetName}!${column}:${column}`,
+    });
+    return (res.data.values || []).map((r: any[]) => (r && r[0] != null ? String(r[0]) : ''));
+};
+
+/** Write several ranges in one call. */
+export const updateCells = async (
+    spreadsheetId: string,
+    data: { range: string; values: string[][] }[]
+) => {
+    if (!isSheetsReady()) return { success: false, error: 'Google Sheets not initialized' };
+    try {
+        await sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId,
+            requestBody: { valueInputOption: 'RAW', data },
+        });
+        return { success: true };
+    } catch (error: any) {
+        console.error('❌ Failed to update Google Sheets cells:', error.message);
+        return { success: false, error: error.message };
+    }
+};
+
+/** Fill header cells only if they are empty (never overwrites). */
+export const ensureHeaderCells = async (
+    spreadsheetId: string,
+    sheetName: string,
+    range: string,
+    headers: string[]
+) => {
+    if (!isSheetsReady()) return;
+    try {
+        const res = await sheets.spreadsheets.values.get({ spreadsheetId, range: `${sheetName}!${range}` });
+        if (!res.data.values || res.data.values.length === 0) {
+            await sheets.spreadsheets.values.update({
+                spreadsheetId,
+                range: `${sheetName}!${range}`,
+                valueInputOption: 'RAW',
+                requestBody: { values: [headers] },
+            });
+        }
+    } catch (error: any) {
+        console.error('❌ Failed to ensure header cells:', error.message);
     }
 };
 
