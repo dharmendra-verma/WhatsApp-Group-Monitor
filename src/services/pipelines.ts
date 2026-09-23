@@ -105,6 +105,7 @@ export interface PipelineState {
     deleteSeeded?: boolean;            // backlog of already-seen messages checked once for deletion
     sendFailures?: Record<string, number>;
     sentTotal?: number;
+    sentMsgIds?: string[];             // ids of messages WE sent — never queue our own replies back
 }
 
 interface StateFile {
@@ -115,6 +116,7 @@ interface StateFile {
 const SEEN_CAP = 1000;
 const DELETE_MAX_ATTEMPTS = 3;
 const SEND_MAX_ATTEMPTS = 3;
+const SENT_IDS_CAP = 200;
 const DEFAULT_CHUNK = 3500;
 const TS_GRACE_SECONDS = 600;          // re-check a small window before lastTs (clock skew / late sync)
 
@@ -547,6 +549,13 @@ export interface Sendable {
     sendMessage: (content: any, options?: any) => Promise<unknown>;
 }
 
+/** Remember an id of a message we sent, so the next poll does not treat it as an incoming question. */
+export const rememberSent = (ps: PipelineState, sent: unknown) => {
+    const id = (sent as any)?.id?._serialized ?? (sent as any)?.id?.$1;
+    if (typeof id !== 'string' || !id) return;
+    ps.sentMsgIds = [...(ps.sentMsgIds || []), id].slice(-SENT_IDS_CAP);
+};
+
 /**
  * Send everything waiting in <dir>/outbox/. One .json file = one reply.
  * A sent file moves to outbox/sent/; a file that fails SEND_MAX_ATTEMPTS times moves to
@@ -575,10 +584,11 @@ export const sweepOutbox = async (
                 if (!fs.existsSync(item.file)) throw new Error(`attachment not found: ${item.file}`);
                 const media = mediaFromPath ? mediaFromPath(item.file) : null;
                 if (!media) throw new Error('no media loader available');
-                await chat.sendMessage(media, { caption: item.caption || item.text || undefined });
+                rememberSent(ps, await chat.sendMessage(media, { caption: item.caption || item.text || undefined }));
             } else {
                 for (const part of chunkText(item.text || '', p.outbox.chunkChars || DEFAULT_CHUNK)) {
-                    await chat.sendMessage(part, item.replyToMsgId ? { quotedMessageId: item.replyToMsgId } : undefined);
+                    rememberSent(ps, await chat.sendMessage(part,
+                        item.replyToMsgId ? { quotedMessageId: item.replyToMsgId } : undefined));
                 }
             }
             const sentDir = path.join(dir, 'sent');
@@ -636,6 +646,7 @@ const runPipeline = async (client: Client, p: PipelineConfig, errors: string[]):
     const fresh = msgs
         .filter(m => m.timestamp >= ps.lastTs - TS_GRACE_SECONDS)
         .filter(m => !seen.has(m.id._serialized))
+        .filter(m => !(ps.sentMsgIds || []).includes(m.id._serialized))   // our own replies are not questions
         .filter(m => !['e2e_notification', 'notification_template', 'gp2', 'revoked', 'protocol'].includes(String(m.type)))
         .sort((a, b) => a.timestamp - b.timestamp);
 

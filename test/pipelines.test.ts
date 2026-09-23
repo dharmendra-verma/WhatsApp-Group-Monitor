@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import {
     extractUrls, extensionFor, stampFor, slug, mediaTypeAllowed,
-    processMessage, readNewResultLines, PipelineConfig, shortMsgId, sweepDeletions, PipelineState, seedDeletionBacklog, chunkText, sweepOutbox,
+    processMessage, readNewResultLines, PipelineConfig, shortMsgId, sweepDeletions, PipelineState, seedDeletionBacklog, chunkText, sweepOutbox, rememberSent,
 } from '../src/services/pipelines';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pipe-'));
@@ -239,4 +239,21 @@ test('sweepOutbox: sends, moves to sent/, attaches files, gives up after 3 failu
     const before = sentCalls.length;
     await sweepOutbox({ ...p, outbox: { dir, chunkChars: 3500 } }, ps, chat, errors, loader);
     assert.ok(sentCalls.length - before >= 3);
+});
+
+test('sweepOutbox records the ids of what it sent, so replies are not read back as questions', async () => {
+    const dir = tmp();
+    const out = path.join(dir, 'outbox');
+    fs.mkdirSync(out, { recursive: true });
+    fs.writeFileSync(path.join(out, '01.json'), JSON.stringify({ text: 'A'.repeat(5000) }));   // 2 parts
+    let n = 0;
+    const chat = { sendMessage: async () => ({ id: { _serialized: `sent_${++n}` } }) };
+    const p: PipelineConfig = { id: 'ask', group: 'g', outbox: { dir, chunkChars: 3500 } };
+    const ps: PipelineState = { lastTs: 0, seen: [] };
+    await sweepOutbox(p, ps, chat, [], () => null);
+    assert.deepEqual(ps.sentMsgIds, ['sent_1', 'sent_2']);
+    // a send that returns nothing useful must not break it
+    rememberSent(ps, undefined);
+    rememberSent(ps, { id: {} });
+    assert.deepEqual(ps.sentMsgIds, ['sent_1', 'sent_2']);
 });
