@@ -5,7 +5,7 @@ import os from 'os';
 import path from 'path';
 import {
     extractUrls, extensionFor, stampFor, slug, mediaTypeAllowed,
-    processMessage, readNewResultLines, PipelineConfig, shortMsgId, sweepDeletions, PipelineState, seedDeletionBacklog,
+    processMessage, readNewResultLines, PipelineConfig, shortMsgId, sweepDeletions, PipelineState, seedDeletionBacklog, chunkText, sweepOutbox,
 } from '../src/services/pipelines';
 
 const tmp = () => fs.mkdtempSync(path.join(os.tmpdir(), 'pipe-'));
@@ -186,4 +186,57 @@ test('seedDeletionBacklog: only messages provably on disk, only once', async () 
     const qs: PipelineState = { lastTs: 0, seen: [id, 'x_y_OTHER00000_z'] };
     assert.equal(seedDeletionBacklog(qp, qs), 1);
     assert.deepEqual(qs.deletable, [id]);
+});
+
+test('chunkText splits long replies on paragraph breaks and numbers the parts', () => {
+    assert.deepEqual(chunkText('short'), ['short']);
+    assert.deepEqual(chunkText('   '), []);
+    const para = 'A'.repeat(300);
+    const parts = chunkText([para, para, para].join('\n\n'), 400);
+    assert.equal(parts.length, 3);
+    assert.ok(parts[0].startsWith('(1/3) '));
+    assert.ok(parts.every(p => p.length <= 400 + 8));
+    // no break mid-word when there are no newlines: the parts rejoin to the original
+    const words = ('alpha bravo '.repeat(120)).trim();
+    const rejoined = chunkText(words, 200).map(p => p.replace(/^\(\d+\/\d+\) /, '')).join(' ');
+    assert.equal(rejoined, words);
+});
+
+test('sweepOutbox: sends, moves to sent/, attaches files, gives up after 3 failures', async () => {
+    const dir = tmp();
+    const out = path.join(dir, 'outbox');
+    fs.mkdirSync(out, { recursive: true });
+    const attach = path.join(dir, 'answer.docx');
+    fs.writeFileSync(attach, 'x');
+    fs.writeFileSync(path.join(out, '01.json'), JSON.stringify({ text: 'hello there' }));
+    fs.writeFileSync(path.join(out, '02.json'), JSON.stringify({ file: attach, caption: 'the doc' }));
+    fs.writeFileSync(path.join(out, '03.json'), JSON.stringify({ file: path.join(dir, 'missing.pdf') }));
+    fs.writeFileSync(path.join(out, '04.json'), 'not json yet');          // still being written
+
+    const sentCalls: any[] = [];
+    const chat = { sendMessage: async (c: any, o: any) => { sentCalls.push([c, o]); } };
+    const p: PipelineConfig = { id: 'ask', group: 'Ask Claude', outbox: { dir } };
+    const ps: PipelineState = { lastTs: 0, seen: [] };
+    const errors: string[] = [];
+    const loader = (f: string) => ({ media: f });
+
+    assert.equal(await sweepOutbox(p, ps, chat, errors, loader), 2);
+    assert.deepEqual(sentCalls[0][0], 'hello there');
+    assert.deepEqual(sentCalls[1][0], { media: attach });
+    assert.equal(sentCalls[1][1].caption, 'the doc');
+    assert.deepEqual(fs.readdirSync(path.join(out, 'sent')).sort(), ['01.json', '02.json']);
+    assert.deepEqual(fs.readdirSync(out).filter(f => f.endsWith('.json')).sort(), ['03.json', '04.json']);
+    assert.equal(errors.length, 0);                                       // 1st failure is silent, retried
+
+    await sweepOutbox(p, ps, chat, errors, loader);
+    await sweepOutbox(p, ps, chat, errors, loader);                       // 3rd failure -> failed/
+    assert.deepEqual(fs.readdirSync(path.join(out, 'failed')), ['03.json']);
+    assert.equal(errors.length, 1);
+    assert.equal(ps.sentTotal, 2);
+
+    // a long reply goes out as several messages
+    fs.writeFileSync(path.join(out, '05.json'), JSON.stringify({ text: 'B'.repeat(9000) }));
+    const before = sentCalls.length;
+    await sweepOutbox({ ...p, outbox: { dir, chunkChars: 3500 } }, ps, chat, errors, loader);
+    assert.ok(sentCalls.length - before >= 3);
 });

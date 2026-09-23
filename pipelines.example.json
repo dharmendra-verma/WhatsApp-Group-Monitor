@@ -32,6 +32,17 @@
         "file": "/app/drops/reading/results.jsonl"
       },
       "deleteAfterCapture": "me"
+    },
+    {
+      "id": "ask",
+      "group": "Ask Claude",
+      "queue": {
+        "dir": "/app/drops/ask"
+      },
+      "outbox": {
+        "dir": "/app/drops/ask"
+      },
+      "deleteAfterCapture": false
     }
   ]
 }

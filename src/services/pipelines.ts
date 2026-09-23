@@ -13,6 +13,8 @@
  *              each entry's status/output back to the sheet row (matched on id)
  *   - deleteAfterCapture: delete the WhatsApp message once it has been captured
  *              durably (file saved / queued / sheet row written) — never before
+ *   - outbox:  send replies BACK to the group — drop a .json file in <dir>/outbox/
+ *              and it is posted, then moved to outbox/sent/
  *
  * The contract with downstream consumers is plain files on a mounted volume,
  * so the consumer never needs network access to this container.
@@ -28,7 +30,7 @@
  */
 import fs from 'fs';
 import path from 'path';
-import { Client, Message } from 'whatsapp-web.js';
+import { Client, Message, MessageMedia } from 'whatsapp-web.js';
 import {
     appendRowsToSheet,
     ensureHeaderCells,
@@ -59,6 +61,11 @@ export interface QueueConfig {
     onlyWithUrls?: boolean;            // queue only messages containing a link (default false)
 }
 
+export interface OutboxConfig {
+    dir: string;                       // <dir>/outbox/*.json are sent, then moved to <dir>/outbox/sent/
+    chunkChars?: number;               // split long text into messages of this size (default 3500)
+}
+
 export interface ResultsConfig {
     file: string;                      // JSONL written by the processor: {msgId,status,output?,note?}
 }
@@ -71,6 +78,7 @@ export interface PipelineConfig {
     sheet?: SheetConfig;
     queue?: QueueConfig;
     results?: ResultsConfig;
+    outbox?: OutboxConfig;
     // Delete the WhatsApp message after it was captured durably:
     //   'me'       — delete for me (clean: no "This message was deleted" bubble; syncs to your linked devices)
     //   'everyone' — revoke for all members where WhatsApp allows it (own message, within its time
@@ -95,6 +103,8 @@ export interface PipelineState {
     deleteFailures?: Record<string, number>;
     deletedTotal?: number;
     deleteSeeded?: boolean;            // backlog of already-seen messages checked once for deletion
+    sendFailures?: Record<string, number>;
+    sentTotal?: number;
 }
 
 interface StateFile {
@@ -104,6 +114,8 @@ interface StateFile {
 
 const SEEN_CAP = 1000;
 const DELETE_MAX_ATTEMPTS = 3;
+const SEND_MAX_ATTEMPTS = 3;
+const DEFAULT_CHUNK = 3500;
 const TS_GRACE_SECONDS = 600;          // re-check a small window before lastTs (clock skew / late sync)
 
 let cfg: PipelinesFile | null = null;
@@ -491,6 +503,107 @@ export const sweepDeletions = async (
 };
 
 // ---------------------------------------------------------------------------
+// Outbox — replies going back to the group
+// ---------------------------------------------------------------------------
+
+export interface OutboxItem {
+    text?: string;                     // message body (split into chunks if long)
+    file?: string;                     // absolute path of a file to attach
+    caption?: string;                  // caption for the attachment
+    replyToMsgId?: string;             // quote this message in the reply
+}
+
+/** Split on paragraph/line boundaries so a reply never breaks mid-sentence. */
+export const chunkText = (text: string, max = DEFAULT_CHUNK): string[] => {
+    const src = (text || '').trim();
+    if (!src) return [];
+    if (src.length <= max) return [src];
+    const out: string[] = [];
+    let rest = src;
+    while (rest.length > max) {
+        const window = rest.slice(0, max);
+        let cut = Math.max(window.lastIndexOf('\n\n'), window.lastIndexOf('\n'));
+        if (cut < max * 0.5) cut = window.lastIndexOf(' ');
+        if (cut < max * 0.5) cut = max;
+        out.push(rest.slice(0, cut).trim());
+        rest = rest.slice(cut).trim();
+    }
+    if (rest) out.push(rest);
+    return out.map((t, i) => (out.length > 1 ? `(${i + 1}/${out.length}) ${t}` : t));
+};
+
+export const readOutboxItem = (file: string): OutboxItem | null => {
+    try {
+        const raw = fs.readFileSync(file, 'utf8');
+        const item = JSON.parse(raw) as OutboxItem;
+        if (!item || (!item.text && !item.file)) return null;
+        return item;
+    } catch {
+        return null;                    // half-written or invalid: try again next poll
+    }
+};
+
+export interface Sendable {
+    sendMessage: (content: any, options?: any) => Promise<unknown>;
+}
+
+/**
+ * Send everything waiting in <dir>/outbox/. One .json file = one reply.
+ * A sent file moves to outbox/sent/; a file that fails SEND_MAX_ATTEMPTS times moves to
+ * outbox/failed/ and is reported — a reply is never silently dropped and never sent twice.
+ */
+export const sweepOutbox = async (
+    p: PipelineConfig,
+    ps: PipelineState,
+    chat: Sendable,
+    errors: string[],
+    mediaFromPath?: (file: string) => any,
+): Promise<number> => {
+    if (!p.outbox) return 0;
+    const dir = path.join(p.outbox.dir, 'outbox');
+    if (!fs.existsSync(dir)) return 0;
+    const files = fs.readdirSync(dir).filter(f => f.endsWith('.json')).sort();
+    if (!files.length) return 0;
+    ps.sendFailures = ps.sendFailures || {};
+    let sent = 0;
+    for (const name of files) {
+        const full = path.join(dir, name);
+        const item = readOutboxItem(full);
+        if (!item) continue;
+        try {
+            if (item.file) {
+                if (!fs.existsSync(item.file)) throw new Error(`attachment not found: ${item.file}`);
+                const media = mediaFromPath ? mediaFromPath(item.file) : null;
+                if (!media) throw new Error('no media loader available');
+                await chat.sendMessage(media, { caption: item.caption || item.text || undefined });
+            } else {
+                for (const part of chunkText(item.text || '', p.outbox.chunkChars || DEFAULT_CHUNK)) {
+                    await chat.sendMessage(part, item.replyToMsgId ? { quotedMessageId: item.replyToMsgId } : undefined);
+                }
+            }
+            const sentDir = path.join(dir, 'sent');
+            fs.mkdirSync(sentDir, { recursive: true });
+            fs.renameSync(full, path.join(sentDir, name));
+            delete ps.sendFailures[name];
+            sent++;
+        } catch (err: any) {
+            const n = (ps.sendFailures[name] || 0) + 1;
+            ps.sendFailures[name] = n;
+            if (n >= SEND_MAX_ATTEMPTS) {
+                const failedDir = path.join(dir, 'failed');
+                fs.mkdirSync(failedDir, { recursive: true });
+                try { fs.renameSync(full, path.join(failedDir, name)); } catch { /* keep it */ }
+                delete ps.sendFailures[name];
+                errors.push(`${p.id}: gave up sending ${name} after ${n} attempts: ${err?.message || err}`);
+            }
+        }
+    }
+    ps.sentTotal = (ps.sentTotal || 0) + sent;
+    if (sent) console.log(`📤 [${p.id}] sent ${sent} reply/replies to "${p.group}"`);
+    return sent;
+};
+
+// ---------------------------------------------------------------------------
 // Polling loop
 // ---------------------------------------------------------------------------
 
@@ -555,6 +668,11 @@ const runPipeline = async (client: Client, p: PipelineConfig, errors: string[]):
         await sweepDeletions(p, ps, async id =>
             (byId.get(id) as any) ?? ((await client.getMessageById(id).catch(() => null)) as any), errors);
     } catch (err: any) { errors.push(`${p.id}: delete sweep: ${err?.message || err}`); }
+    saveState();
+
+    try {
+        await sweepOutbox(p, ps, chat as any, errors, (f: string) => MessageMedia.fromFilePath(f));
+    } catch (err: any) { errors.push(`${p.id}: outbox: ${err?.message || err}`); }
     saveState();
 
     try { await syncResults(p); } catch (err: any) { errors.push(`${p.id}: ${err?.message || err}`); }
@@ -637,6 +755,8 @@ export const getPipelinesStatus = () => ({
         deleteAfterCapture: p.deleteAfterCapture || false,
         awaitingDelete: state.pipelines[p.id]?.deletable?.length ?? 0,
         deletedTotal: state.pipelines[p.id]?.deletedTotal ?? 0,
+        outbox: p.outbox ? path.join(p.outbox.dir, 'outbox') : false,
+        sentTotal: state.pipelines[p.id]?.sentTotal ?? 0,
     })),
     lastRun,
 });
